@@ -94,6 +94,8 @@ echo "==> pushing"
 git update-ref refs/heads/release "$RELEASE"
 git push origin main
 git push origin public
-# First publish after the history fix has to replace the leaked ancestry.
-git push --force-with-lease github release:main
+# No --force: release is append-only by construction, so this must
+# fast-forward. If it ever does not, something rewrote the public history
+# and that deserves a look rather than an override.
+git push github release:main
 echo "==> done: github/main = $RELEASE"
