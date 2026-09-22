@@ -77,7 +77,10 @@ if [[ -n "$PARENT" && "$(git rev-parse "$PARENT^{tree}")" == "$TREE" ]]; then
     exit 0
 fi
 
-SUBJECT="$(git log -1 --format=%s public)"
+# public's tip is a merge, so its subject is "Merge branch 'main' into
+# public" -- which tells a reader of the public repo nothing. Use the newest
+# real change instead.
+SUBJECT="$(git log -1 --no-merges --format=%s main)"
 if [[ -n "$PARENT" ]]; then
     RELEASE="$(git commit-tree "$TREE" -p "$PARENT" -m "$SUBJECT")"
 else
