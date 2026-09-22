@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "houdini": {
+      "command": "uv",
+      "args": ["run", "python", "houdini_mcp_server.py"]
+    }
+  }
+}

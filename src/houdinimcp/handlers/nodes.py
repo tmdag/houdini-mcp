@@ -1,0 +1,509 @@
+"""Node CRUD, wiring, flags, layout, and material handlers."""
+import hou
+
+
+def create_node(node_type, parent_path="/obj", name=None, position=None, parameters=None):
+    """Creates a new node in the specified parent."""
+    try:
+        parent = hou.node(parent_path)
+        if not parent:
+            raise ValueError(f"Parent path not found: {parent_path}")
+
+        node = parent.createNode(node_type, node_name=name)
+        if position and len(position) >= 2:
+            node.setPosition([position[0], position[1]])
+        if parameters:
+            for p_name, p_val in parameters.items():
+                parm = node.parm(p_name)
+                if parm:
+                    parm.set(p_val)
+
+        return {
+            "name": node.name(),
+            "path": node.path(),
+            "type": node.type().name(),
+            "position": list(node.position()),
+        }
+    except Exception as e:
+        raise Exception(f"Failed to create node: {str(e)}")
+
+
+def modify_node(path, parameters=None, position=None, name=None):
+    """Modifies an existing node."""
+    node = hou.node(path)
+    if not node:
+        raise ValueError(f"Node not found: {path}")
+
+    changes = []
+    old_name = node.name()
+
+    if name and name != old_name:
+        node.setName(name)
+        changes.append(f"Renamed from {old_name} to {name}")
+
+    if position and len(position) >= 2:
+        node.setPosition([position[0], position[1]])
+        changes.append(f"Position set to {position}")
+
+    if parameters:
+        for p_name, p_val in parameters.items():
+            parm = node.parm(p_name)
+            if parm:
+                old_val = parm.eval()
+                parm.set(p_val)
+                changes.append(f"Parameter {p_name} changed from {old_val} to {p_val}")
+
+    return {"path": node.path(), "changes": changes}
+
+
+def delete_node(path):
+    """Deletes a node from the scene."""
+    node = hou.node(path)
+    if not node:
+        raise ValueError(f"Node not found: {path}")
+    node_path = node.path()
+    node_name = node.name()
+    node.destroy()
+    return {"deleted": node_path, "name": node_name}
+
+
+def get_node_info(path):
+    """Returns detailed information about a single node."""
+    node = hou.node(path)
+    if not node:
+        raise ValueError(f"Node not found: {path}")
+
+    node_info = {
+        "name": node.name(),
+        "path": node.path(),
+        "type": node.type().name(),
+        "category": node.type().category().name(),
+        "position": [node.position()[0], node.position()[1]],
+        "parameters": [],
+        "inputs": [],
+        "outputs": [],
+    }
+    try:
+        col = node.color()
+        node_info["color"] = list(col) if col else None
+    except Exception:
+        node_info["color"] = None
+    try:
+        node_info["is_bypassed"] = node.isBypassed()
+    except Exception:
+        node_info["is_bypassed"] = None
+    try:
+        node_info["is_displayed"] = node.isDisplayFlagSet()
+    except Exception:
+        node_info["is_displayed"] = None
+    try:
+        node_info["is_rendered"] = node.isRenderFlagSet()
+    except Exception:
+        node_info["is_rendered"] = None
+
+    for i, parm in enumerate(node.parms()):
+        if i >= 20:
+            break
+        try:
+            from .parameters import parm_label
+            label = parm_label(parm)
+        except Exception:
+            label = parm.name()
+        try:
+            ptype = parm.parmTemplate().type().name()
+        except Exception:
+            ptype = "unknown"
+        try:
+            value = str(parm.eval())
+        except Exception:
+            value = None
+        try:
+            raw = parm.rawValue()
+        except Exception:
+            raw = None
+        node_info["parameters"].append({
+            "name": parm.name(),
+            "label": label,
+            "value": value,
+            "raw_value": raw,
+            "type": ptype,
+        })
+
+    for i, in_node in enumerate(node.inputs()):
+        if in_node:
+            node_info["inputs"].append({
+                "index": i,
+                "name": in_node.name(),
+                "path": in_node.path(),
+                "type": in_node.type().name()
+            })
+
+    for i, out_conn in enumerate(node.outputConnections()):
+        out_node = out_conn.outputNode()
+        node_info["outputs"].append({
+            "index": i,
+            "name": out_node.name(),
+            "path": out_node.path(),
+            "type": out_node.type().name(),
+            "input_index": out_conn.inputIndex()
+        })
+
+    return node_info
+
+
+def connect_nodes(src_path, dst_path, dst_input_index=0, src_output_index=0):
+    """Connect two nodes: src output -> dst input."""
+    src = hou.node(src_path)
+    dst = hou.node(dst_path)
+    if not src:
+        raise ValueError(f"Source node not found: {src_path}")
+    if not dst:
+        raise ValueError(f"Destination node not found: {dst_path}")
+    dst.setInput(dst_input_index, src, src_output_index)
+    return {
+        "connected": True,
+        "src": src.path(),
+        "dst": dst.path(),
+        "dst_input": dst_input_index,
+        "src_output": src_output_index,
+    }
+
+
+def disconnect_node_input(node_path, input_index=0):
+    """Disconnect a specific input on a node."""
+    node = hou.node(node_path)
+    if not node:
+        raise ValueError(f"Node not found: {node_path}")
+    node.setInput(input_index, None)
+    return {"disconnected": True, "node": node.path(), "input_index": input_index}
+
+
+def set_node_flags(node_path, display=None, render=None, bypass=None):
+    """Set display, render, and/or bypass flags on a node."""
+    node = hou.node(node_path)
+    if not node:
+        raise ValueError(f"Node not found: {node_path}")
+    changes = []
+    if display is not None:
+        node.setDisplayFlag(display)
+        changes.append(f"display={display}")
+    if render is not None:
+        # LOP nodes have no setRenderFlag (H22). SOP/ROP/OBJ do.
+        if hasattr(node, "setRenderFlag"):
+            node.setRenderFlag(render)
+            changes.append(f"render={render}")
+        else:
+            try:
+                node.setGenericFlag(hou.nodeFlag.Render, render)
+                changes.append("render=%s (generic)" % render)
+            except Exception:
+                changes.append("render skipped (node type %s)" % node.type().name())
+    if bypass is not None:
+        node.bypass(bypass)
+        changes.append(f"bypass={bypass}")
+    return {"path": node.path(), "changes": changes}
+
+
+def layout_children(node_path="/obj"):
+    """Auto-layout child nodes."""
+    node = hou.node(node_path)
+    if not node:
+        raise ValueError(f"Node not found: {node_path}")
+    node.layoutChildren()
+    return {"path": node.path(), "laid_out": True}
+
+
+def set_node_color(node_path, color):
+    """Set a node's color as [r, g, b] (0-1 range)."""
+    node = hou.node(node_path)
+    if not node:
+        raise ValueError(f"Node not found: {node_path}")
+    if len(color) != 3:
+        raise ValueError(f"Color must be [r, g, b], got: {color}")
+    node.setColor(hou.Color(color[0], color[1], color[2]))
+    return {"path": node.path(), "color": color}
+
+
+def set_material(node_path, material_type="principledshader", name=None, parameters=None):
+    """Creates or applies a material to an OBJ node."""
+    target_node = hou.node(node_path)
+    if not target_node:
+        raise ValueError(f"Node not found: {node_path}")
+
+    if target_node.type().category().name() != "Object":
+        raise ValueError(
+            f"Node {node_path} is not an OBJ-level node and cannot accept direct materials."
+        )
+
+    mat_context = hou.node("/mat")
+    if not mat_context:
+        mat_context = hou.node("/shop")
+        if not mat_context:
+            raise RuntimeError("No /mat or /shop context found to create materials.")
+
+    mat_name = name or (f"{material_type}_auto")
+    mat_node = mat_context.node(mat_name)
+    if not mat_node:
+        mat_node = mat_context.createNode(material_type, mat_name)
+
+    if parameters:
+        for k, v in parameters.items():
+            p = mat_node.parm(k)
+            if p:
+                p.set(v)
+
+    mat_parm = target_node.parm("shop_materialpath")
+    if mat_parm:
+        mat_parm.set(mat_node.path())
+    else:
+        geo_sop = target_node.node("geometry")
+        if not geo_sop:
+            raise RuntimeError("No 'geometry' node found inside OBJ to apply material to.")
+
+        material_sop = geo_sop.node("material1")
+        if not material_sop:
+            material_sop = geo_sop.createNode("material", "material1")
+            first_sop = None
+            for c in geo_sop.children():
+                if c.isDisplayFlagSet():
+                    first_sop = c
+                    break
+            if first_sop:
+                material_sop.setFirstInput(first_sop)
+            material_sop.setDisplayFlag(True)
+            material_sop.setRenderFlag(True)
+
+        mat_sop_parm = material_sop.parm("shop_materialpath1")
+        if mat_sop_parm:
+            mat_sop_parm.set(mat_node.path())
+        else:
+            raise RuntimeError(
+                "No shop_materialpath1 on Material SOP to assign the material."
+            )
+
+    return {
+        "status": "ok",
+        "material_node": mat_node.path(),
+        "applied_to": target_node.path(),
+    }
+
+
+def set_expression(node_path, parm_name, expression, language="hscript"):
+    """Set an expression on a node parameter."""
+    node = hou.node(node_path)
+    if not node:
+        raise ValueError(f"Node not found: {node_path}")
+    parm = node.parm(parm_name)
+    if not parm:
+        raise ValueError(f"Parameter not found: {parm_name} on {node_path}")
+    lang = hou.exprLanguage.Hscript if language == "hscript" else hou.exprLanguage.Python
+    parm.setExpression(expression, lang)
+    return {
+        "path": node.path(),
+        "parm": parm_name,
+        "expression": expression,
+        "language": language,
+    }
+
+
+def copy_node(path, destination_path):
+    """Copy a node to a new parent."""
+    node = hou.node(path)
+    if not node:
+        raise ValueError(f"Node not found: {path}")
+    dest = hou.node(destination_path)
+    if not dest:
+        raise ValueError(f"Destination not found: {destination_path}")
+    items = hou.copyNodesTo([node], dest)
+    new_node = items[0]
+    return {"path": new_node.path(), "name": new_node.name(), "type": new_node.type().name()}
+
+
+def move_node(path, destination_path):
+    """Move a node to a new parent."""
+    node = hou.node(path)
+    if not node:
+        raise ValueError(f"Node not found: {path}")
+    dest = hou.node(destination_path)
+    if not dest:
+        raise ValueError(f"Destination not found: {destination_path}")
+    items = hou.moveNodesTo([node], dest)
+    new_node = items[0]
+    return {"path": new_node.path(), "name": new_node.name(), "type": new_node.type().name()}
+
+
+def rename_node(path, new_name):
+    """Rename a node."""
+    node = hou.node(path)
+    if not node:
+        raise ValueError(f"Node not found: {path}")
+    old_name = node.name()
+    node.setName(new_name)
+    return {"old_name": old_name, "new_name": node.name(), "path": node.path()}
+
+
+def list_children(path, recursive=False):
+    """List all children of a node."""
+    node = hou.node(path)
+    if not node:
+        raise ValueError(f"Node not found: {path}")
+    if recursive:
+        children = node.allSubChildren()
+    else:
+        children = node.children()
+    nodes = []
+    for child in children:
+        nodes.append({
+            "name": child.name(),
+            "path": child.path(),
+            "type": child.type().name(),
+        })
+    return {"path": path, "count": len(nodes), "children": nodes}
+
+
+def find_nodes(pattern, node_type=None, root_path="/", recursive=True):
+    """Find nodes matching a name pattern, optionally filtered by type.
+
+    Bare names become *name* and search descendants (recursiveGlob).
+    `hou.Node.glob('*')` is only immediate children — that hid the whole show.
+    """
+    import fnmatch
+    root = hou.node(root_path)
+    if not root:
+        raise ValueError(f"Root not found: {root_path}")
+    namepat = pattern or "*"
+    if not any(c in namepat for c in "*?[]"):
+        namepat = "*%s*" % namepat
+    matches = []
+    if recursive and hasattr(root, "recursiveGlob"):
+        try:
+            matches = list(root.recursiveGlob(namepat) or ())
+        except Exception:
+            matches = []
+    if not matches and hasattr(root, "glob"):
+        try:
+            matches = list(root.glob(namepat) or ())
+        except Exception:
+            matches = []
+    if recursive and not matches and hasattr(root, "allSubChildren"):
+        try:
+            matches = [
+                n for n in (root.allSubChildren() or ())
+                if fnmatch.fnmatch(n.name(), namepat)
+            ]
+        except Exception:
+            matches = []
+    nodes = []
+    for n in matches:
+        if node_type and n.type().name() != node_type:
+            continue
+        nodes.append({
+            "name": n.name(),
+            "path": n.path(),
+            "type": n.type().name(),
+        })
+    return {"pattern": pattern, "glob": namepat, "count": len(nodes), "nodes": nodes}
+
+
+def list_node_types(category=None, pattern=None, limit=200):
+    """List node types, optionally filtered by category and glob pattern.
+
+    The cap used to sit on the outer category loop, so it only applied
+    between categories: asking for Sop returned all 1690 of them (183KB) and
+    blew the MCP client's token limit. It now breaks the inner loop, and
+    *pattern* is a fnmatch glob against the type name or its label.
+    """
+    import fnmatch
+    import re
+
+    limit = max(1, int(limit))
+    # Compile the glob with IGNORECASE rather than lowercasing it. Lowercasing
+    # runs inside character classes too, so "[A-_]" became "[a-_]" -- a
+    # reversed range that fnmatch turns into a never-match -- and "[A-z]"
+    # silently stopped matching names beginning with an underscore.
+    matcher = re.compile(fnmatch.translate(pattern), re.IGNORECASE) if pattern else None
+    result = []
+    truncated = False
+    for cat_name, cat in hou.nodeTypeCategories().items():
+        if category and cat_name != category:
+            continue
+        for name, node_type in cat.nodeTypes().items():
+            try:
+                label = node_type.description()
+            except Exception:
+                label = ""
+            if matcher and not (matcher.match(name) or matcher.match(label)):
+                continue
+            if len(result) >= limit:
+                truncated = True
+                break
+            result.append({"name": name, "category": cat_name, "label": label})
+        if truncated:
+            break
+    out = {"count": len(result), "truncated": truncated, "types": result}
+    if truncated:
+        out["hint"] = (
+            "stopped at limit=%d; narrow with pattern='*foo*' or raise limit"
+            % limit
+        )
+    return out
+
+
+def connect_nodes_batch(connections):
+    """Connect multiple node pairs at once.
+
+    connections: list of dicts with src_path, dst_path, dst_input_index, src_output_index
+    """
+    results = []
+    for conn in connections:
+        src = hou.node(conn["src_path"])
+        dst = hou.node(conn["dst_path"])
+        if not src:
+            raise ValueError(f"Source not found: {conn['src_path']}")
+        if not dst:
+            raise ValueError(f"Destination not found: {conn['dst_path']}")
+        dst.setInput(conn.get("dst_input_index", 0), src, conn.get("src_output_index", 0))
+        results.append({
+            "src": src.path(), "dst": dst.path(),
+            "dst_input": conn.get("dst_input_index", 0),
+        })
+    return {"connected": len(results), "connections": results}
+
+
+def reorder_inputs(path, input_indices):
+    """Reorder the inputs of a node by specifying the new index order."""
+    node = hou.node(path)
+    if not node:
+        raise ValueError(f"Node not found: {path}")
+    current_inputs = list(node.inputs())
+    new_inputs = []
+    for idx in input_indices:
+        if idx is not None and idx < len(current_inputs):
+            new_inputs.append(current_inputs[idx])
+        else:
+            new_inputs.append(None)
+    for i, inp in enumerate(new_inputs):
+        node.setInput(i, inp)
+    return {"path": node.path(), "new_order": input_indices}
+
+
+def find_error_nodes(root_path="/obj"):
+    """Scan node hierarchy for cook errors and warnings."""
+    root = hou.node(root_path)
+    if not root:
+        raise ValueError(f"Root node not found: {root_path}")
+    error_nodes = []
+    for node in root.allSubChildren():
+        if node.errors():
+            error_nodes.append({
+                "path": node.path(),
+                "type": node.type().name(),
+                "errors": node.errors(),
+            })
+        elif node.warnings():
+            error_nodes.append({
+                "path": node.path(),
+                "type": node.type().name(),
+                "warnings": node.warnings(),
+            })
+    return {"root": root_path, "error_count": len(error_nodes), "nodes": error_nodes}
